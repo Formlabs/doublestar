@@ -295,8 +295,8 @@ func doMatching(pattern string, nameComponents []string) (matched bool, err erro
 	return false, nil
 }
 
-// Glob returns the names of all files matching pattern or nil
-// if there is no matching file. The syntax of pattern is the same
+// Glob sends the names of all files matching pattern over matches channel
+// and sends errors over errors channel. The syntax of pattern is the same
 // as in Match. The pattern may describe hierarchical names such as
 // /usr/*/bin/ed (assuming the Separator is '/').
 //
@@ -308,11 +308,19 @@ func doMatching(pattern string, nameComponents []string) (matched bool, err erro
 // systems where the separator is '\\' (Windows), escaping will be
 // disabled.
 //
-// Note: this is meant as a drop-in replacement for filepath.Glob().
+// Note: this is meant as a channel-oriented replacement for filepath.Glob().
 //
-func Glob(pattern string) (matches []string, err error) {
+
+func Glob(pattern string, matches chan string, errors chan error) {
+	defer close(matches)
+	defer close(errors)
+
+	errors <- glob(pattern, matches)
+}
+
+func glob(pattern string, matches chan string) (err error) {
 	if len(pattern) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	// if the pattern starts with alternatives, we need to handle that here - the
@@ -320,16 +328,15 @@ func Glob(pattern string) (matches []string, err error) {
 	if pattern[0] == '{' {
 		options, endOptions := splitAlternatives(pattern[1:])
 		if endOptions == -1 {
-			return nil, ErrBadPattern
+			return ErrBadPattern
 		}
 		for _, o := range options {
-			m, e := Glob(o + pattern[endOptions+1:])
+			e := glob(o+pattern[endOptions+1:], matches)
 			if e != nil {
-				return nil, e
+				return e
 			}
-			matches = append(matches, m...)
 		}
-		return matches, nil
+		return nil
 	}
 
 	// If the pattern is relative or absolute and we're on a non-Windows machine,
@@ -349,8 +356,7 @@ func Glob(pattern string) (matches []string, err error) {
 }
 
 // Perform a glob
-func doGlob(basedir, pattern string, matches []string) (m []string, e error) {
-	m = matches
+func doGlob(basedir, pattern string, matches chan string) (e error) {
 	e = nil
 
 	// if the pattern starts with any path components that aren't globbed (ie,
@@ -375,7 +381,7 @@ func doGlob(basedir, pattern string, matches []string) (m []string, e error) {
 
 	// if the pattern is empty, we've found a match
 	if len(pattern) == 0 {
-		m = append(m, basedir)
+		matches <- basedir
 		return
 	}
 
@@ -420,12 +426,12 @@ func doGlob(basedir, pattern string, matches []string) (m []string, e error) {
 			if file.IsDir() {
 				// recurse into directories
 				if lastComponent {
-					m = append(m, filepath.Join(basedir, file.Name()))
+					matches <- filepath.Join(basedir, file.Name())
 				}
-				m, e = doGlob(filepath.Join(basedir, file.Name()), pattern, m)
+				e = doGlob(filepath.Join(basedir, file.Name()), pattern, matches)
 			} else if lastComponent {
 				// if the pattern's last component is a doublestar, we match filenames, too
-				m = append(m, filepath.Join(basedir, file.Name()))
+				matches <- filepath.Join(basedir, file.Name())
 			}
 		}
 		if lastComponent {
@@ -444,10 +450,10 @@ func doGlob(basedir, pattern string, matches []string) (m []string, e error) {
 		}
 		if match != nil {
 			if len(match) == 0 {
-				m = append(m, filepath.Join(basedir, file.Name()))
+				matches <- filepath.Join(basedir, file.Name())
 			} else {
 				for _, alt := range match {
-					m, e = doGlob(filepath.Join(basedir, file.Name()), alt, m)
+					e = doGlob(filepath.Join(basedir, file.Name()), alt, matches)
 				}
 			}
 		}
